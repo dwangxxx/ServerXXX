@@ -88,6 +88,12 @@ RequestData::RequestData(int epollfd_, int fd_, std::string path_):
 RequestData::~RequestData()
 {
     std::cout << "Destroy RequestData()" << std::endl;
+    if (timer.lock())
+    {
+        auto myTimer = timer.lock();
+        myTimer->clearReq();
+        timer.reset();
+    }
     close(fd);
 }
 
@@ -117,21 +123,22 @@ void RequestData::reset()
     state = STATE_PARSE_URI;
     hState = hStart;
     headers.clear();
+    keepAlive = false;
     // weak_ptr.lock()获取一个shared_ptr指针
+    /* 
     if (timer.lock())
     {
-        // 重置timer
-        std::shared_ptr<Timer> myTimer(timer.lock());
-        myTimer->clearReq();
+        // timer置空
         timer.reset();
-    }
+    } */
 }
 
+// 将当前RequestData对象与Timer分离
 void RequestData::separateTimer()
 {
     if (timer.lock())
     {
-        std::shared_ptr<Timer> myTimer(timer.lock());
+        auto myTimer(timer.lock());
         // 首先清除myTimer的RequestData
         myTimer->clearReq();
         // 清除timer指针
@@ -159,8 +166,8 @@ void RequestData::handleRead()
             或者是来自网络的数据没有到达
             最可能是对端已经关闭，统一按照对端已经关闭处理
             */
-           error = true;
-           break;
+            error = true;
+            break;
         }
 
         // 如果正在解析请求行字段
@@ -283,22 +290,362 @@ void RequestData::handleWrite()
 // 处理当前连接的连接相关问题
 void RequestData::handleConn()
 {
+    // 如果未出错
     if (!error)
     {
         if (events != 0)
         {
+            // 新增时间信息
             int timeout = 2000;
             if (keepAlive)
                 timeout = 5 * 60 * 1000;
             isRead = false;
             isWrite = false;
+            // 新增一个Timer定时器
             Epoll::addTimer(shared_from_this(), timeout);
             if ((events & EPOLLIN) && (events & EPOLLOUT))
             {
                 events = __uint32_t(0);
                 events |= EPOLLOUT;
             }
-            
+            events |= (EPOLLET | EPOLLONESHOT);
+            __uint32_t events_ = events;
+            events = 0;
+            // 修改fd的监听事件
+            if (Epoll::epollMod(fd, shared_from_this(), events_) < 0)
+            {
+                std::cout << "Epoll::epollMod error" << std::endl;
+            }
+        }
+        else if (keepAlive)
+        {
+            events |= (EPOLLIN | EPOLLET | EPOLLONESHOT);
+            int timeout = 5 * 60 * 1000;
+            isRead = false;
+            isWrite = false;
+            // 新增一个Timer定时器
+            Epoll::addTimer(shared_from_this(), timeout);
+            __uint32_t events_ = events;
+            events = 0;
+            // 修改fd的监听事件
+            if (Epoll::epollMod(fd, shared_from_this(), events_) < 0)
+            {
+                std::cout << "Epoll::epollMod error" << std::endl;
+            }
         }
     }
+}
+
+// 解析HTTP请求行
+int RequestData::parseURI()
+{
+    std::string &str = inBuf;
+    // 读到完整的请求行再开始解析请求
+    int pos = str.find('\r', readPos);
+    if (pos < 0)
+    {
+        return PARSE_URI_AGAIN;
+    }
+    // 去掉请求行所占的空间，节省空间
+    std::string requestLine = str.substr(0, pos);
+    if (str.size() > pos + 1)
+        str = str.substr(pos + 1);
+    else 
+        str.clear();
+    // Method
+    pos = requestLine.find("GET");
+    if (pos < 0)
+    {
+        pos = requestLine.find("POST");
+        if (pos < 0)
+            return PARSE_URI_ERROR;
+        else
+            method = METHOD_POST;
+    }
+    else
+        method = METHOD_GET;
+    pos = requestLine.find("/", pos);
+    if (pos < 0)
+        return PARSE_URI_ERROR;
+    else
+    {
+        int _pos = requestLine.find(' ', pos);
+        if (_pos < 0)
+            return PARSE_URI_ERROR;
+        else
+        {
+            if (_pos - pos > 1)
+            {
+                fileName = requestLine.substr(pos + 1, _pos - pos - 1);
+                int __pos = fileName.find('?');
+                if (__pos >= 0)
+                {
+                    fileName = fileName.substr(0, __pos);
+                }
+            }
+                
+            else
+                fileName = "index.html";
+        }
+        pos = _pos;
+    }
+    pos = requestLine.find("/", pos);
+    if (pos < 0)
+        return PARSE_URI_ERROR;
+    else
+    {
+        if (requestLine.size() - pos <= 3)
+            return PARSE_URI_ERROR;
+        else
+        {
+            // HTTP版本
+            std::string ver = requestLine.substr(pos + 1, 3);
+            if (ver == "1.0")
+                version = HTTP_10;
+            else if (ver == "1.1")
+                version = HTTP_11;
+            else
+                return PARSE_URI_ERROR;
+        }
+    }
+    return PARSE_URI_SUCCESS;
+}
+
+// 解析HTTP请求头部
+int RequestData::parseHeader()
+{
+    std::string &str = inBuf;
+    int key_start = -1, key_end = -1, value_start = -1, value_end = -1;
+    int readLineBegin = 0;
+    bool notFinish = true;
+    for (int i = 0; i < str.size() && notFinish; ++i)
+    {
+        switch(hState)
+        {
+            case hStart:
+            {
+                if (str[i] == '\n' || str[i] == '\r')
+                    break;
+                hState = hKey;
+                key_start = i;
+                readLineBegin = i;
+                break;
+            }
+            case hKey:
+            {
+                if (str[i] == ':')
+                {
+                    key_end = i;
+                    if (key_end - key_start <= 0)
+                        return PARSE_HEADER_ERROR;
+                    hState = hColon;
+                }
+                else if (str[i] == '\n' || str[i] == '\r')
+                    return PARSE_HEADER_ERROR;
+                break;  
+            }
+            case hColon:
+            {
+                if (str[i] == ' ')
+                {
+                    hState = hSpaceAfterColon;
+                }
+                else
+                    return PARSE_HEADER_ERROR;
+                break;  
+            }
+            case hSpaceAfterColon:
+            {
+                hState = hValue;
+                value_start = i;
+                break;  
+            }
+            case hValue:
+            {
+                if (str[i] == '\r')
+                {
+                    hState = hCR;
+                    value_end = i;
+                    if (value_end - value_start <= 0)
+                        return PARSE_HEADER_ERROR;
+                }
+                else if (i - value_start > 255)
+                    return PARSE_HEADER_ERROR;
+                break;  
+            }
+            case hCR:
+            {
+                if (str[i] == '\n')
+                {
+                    hState = hLF;
+                    std::string key(str.begin() + key_start, str.begin() + key_end);
+                    std::string value(str.begin() + value_start, str.begin() + value_end);
+                    headers[key] = value;
+                    readLineBegin = i;
+                }
+                else
+                    return PARSE_HEADER_ERROR;
+                break;  
+            }
+            case hLF:
+            {
+                if (str[i] == '\r')
+                {
+                    hState = hEndCR;
+                }
+                else
+                {
+                    key_start = i;
+                    hState = hKey;
+                }
+                break;
+            }
+            case hEndCR:
+            {
+                if (str[i] == '\n')
+                {
+                    hState = hEndLF;
+                }
+                else
+                    return PARSE_HEADER_ERROR;
+                break;
+            }
+            case hEndLF:
+            {
+                notFinish = false;
+                key_start = i;
+                readLineBegin = i;
+                break;
+            }
+        }
+    }
+    if (hState == hEndLF)
+    {
+        str = str.substr(readLineBegin);
+        return PARSE_HEADER_SUCCESS;
+    }
+    str = str.substr(readLineBegin);
+    return PARSE_HEADER_AGAIN;
+}
+
+// 解析HTTP请求数据
+int RequestData::parseRequest()
+{
+    if (method == METHOD_POST)
+    {
+        std::string header;
+        // 响应行
+        header += std::string("HTTP/1.1 200 OK\r\n");
+        // 响应头部数据
+        if(headers.find("Connection") != headers.end() && headers["Connection"] == "keep-alive")
+        {
+            keepAlive = true;
+            header += std::string("Connection: keep-alive\r\n") + "Keep-Alive: timeout=" + std::to_string(5 * 60 * 1000) + "\r\n";
+        }
+        int length = stoi(headers["Content-length"]);
+        std::vector<char> data(inBuf.begin(), inBuf.begin() + length);
+        std::cout << " data.size()=" << data.size() << std::endl;
+        Mat src = imdecode(data, CV_LOAD_IMAGE_ANYDEPTH|CV_LOAD_IMAGE_ANYCOLOR);
+        imwrite("receive.bmp", src);
+        std::cout << "1" << std::endl;
+        Mat res = stitch(src);
+        std::cout << "2" << std::endl;
+        std::vector<uchar> data_encode;
+        imencode(".png", res, data_encode);
+        std::cout << "3" << std::endl;
+        header += std::string("Content-length: ") + std::to_string(data_encode.size()) + "\r\n\r\n";
+        std::cout << "4" << std::endl;
+        // 响应报文数据
+        outBuf += header + std::string(data_encode.begin(), data_encode.end());
+        std::cout << "5" << std::endl;
+        inBuf = inBuf.substr(length);
+        return ANALYSIS_SUCCESS;
+    }
+    else if (method == METHOD_GET)
+    {
+        std::string header;
+        // 响应行
+        header += "HTTP/1.1 200 OK\r\n";
+        // 响应头部数据
+        if(headers.find("Connection") != headers.end() && headers["Connection"] == "keep-alive")
+        {
+            keepAlive = true;
+            header += std::string("Connection: keep-alive\r\n") + "Keep-Alive: timeout=" + std::to_string(5 * 60 * 1000) + "\r\n";
+        }
+        int dot_pos = fileName.find('.');
+        std::string fileType;
+        if (dot_pos < 0) 
+            fileType = MimeType::getMime("default");
+        else
+            fileType = MimeType::getMime(fileName.substr(dot_pos));
+        struct stat sbuf;
+        if (stat(fileName.c_str(), &sbuf) < 0)
+        {
+            header.clear();
+            handleError(fd, 404, "Not Found!");
+            return ANALYSIS_ERROR;
+        }
+        header += "Content-type: " + fileType + "\r\n";
+        header += "Content-length: " + std::to_string(sbuf.st_size) + "\r\n";
+        // 头部结束
+        header += "\r\n";
+        outBuf += header;
+        int src_fd = open(fileName.c_str(), O_RDONLY, 0);
+        char *src_addr = static_cast<char*>(mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, src_fd, 0));
+        close(src_fd);
+        // 源数据
+        outBuf += src_addr;
+        munmap(src_addr, sbuf.st_size);
+        return ANALYSIS_SUCCESS;
+    }
+    else
+        return ANALYSIS_ERROR;
+}
+
+void RequestData::handleError(int fd, int err_no, std::string msg)
+{
+    msg = " " + msg;
+    char send_buf[MAX_BUF_SIZE];
+    std::string body_buf, header_buf;
+    body_buf += "<html><title>Something Error!!!</title>";
+    body_buf += "<body bgcolor=\"ffffff\">";
+    body_buf += std::to_string(err_no) + msg;
+    body_buf += "<hr><em> LinYa's Web Server</em>\n</body></html>";
+
+    header_buf += "HTTP/1.1 " + std::to_string(err_no) + msg + "\r\n";
+    header_buf += "Content-type: text/html\r\n";
+    header_buf += "Connection: close\r\n";
+    header_buf += "Content-length: " + std::to_string(body_buf.size()) + "\r\n";
+    header_buf += "\r\n";
+    // 错误处理不考虑writen不完的情况
+    sprintf(send_buf, "%s", header_buf.c_str());
+    writen(fd, send_buf, strlen(send_buf));
+    sprintf(send_buf, "%s", body_buf.c_str());
+    writen(fd, send_buf, strlen(send_buf));
+}
+
+void RequestData::disableWR()
+{
+    isRead = false;
+    isWrite = false;
+}
+
+void RequestData::enableRead()
+{
+    isRead = true;
+}
+
+void RequestData::enableWrite()
+{
+    isWrite = true;
+}
+
+bool RequestData::isCanRead()
+{
+    return isRead;
+}
+
+bool RequestData::isCanWrite()
+{
+    return isWrite;
 }

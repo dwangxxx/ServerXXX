@@ -98,6 +98,7 @@ void Epoll::epollWait(int listen_fd, int max_events,int timeout)
         }
     }
 
+    // 每次epollWait都出发timerManager的心搏函数
     timer_manager.eventHandler();
 }
 
@@ -168,7 +169,7 @@ vector<shared_ptr<RequestData>> Epoll::getEvents(int listen_fd, int events_num, 
                 cout << "error event\n" << endl;
                 if (requests[fd])
                     requests[fd]->separateTimer();
-                requests[fd]->reset();
+                requests[fd].reset();
                 continue;
             }
 
@@ -185,6 +186,7 @@ vector<shared_ptr<RequestData>> Epoll::getEvents(int listen_fd, int events_num, 
                 cur_req->separateTimer();
                 // 添加到任务队列中
                 req_data.push_back(cur_req);
+                // 从requests中销毁
                 requests[fd].reset();
             }
             else 
