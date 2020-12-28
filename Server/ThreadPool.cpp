@@ -1,4 +1,5 @@
 #include "ThreadPool.h"
+#include "RequestData.h"
 
 pthread_mutex_t ThreadPool::lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t ThreadPool::cond = PTHREAD_COND_INITIALIZER;
@@ -57,17 +58,17 @@ void Handler(std::shared_ptr<void> req)
     // 智能指针指向RequestData
     std::shared_ptr<RequestData> request = std::static_pointer_cast<RequestData>(req);
     // 处理读请求
-    if (request->writable())
+    if (request->isCanWrite())
         request->handleWrite();
     // 处理写请求
-    else if (request->readable())
+    else if (request->isCanRead())
         request->handleRead();
     // 处理当前连接
     request->handleConn();
 }
 
 // 往任务队列中加入任务, 参数是需要处理的函数和相应的函数实参
-int ThreadPool::ThreadPoolAdd(std::shared_ptr<void> args, std::function<void(std::shared_ptr<void>)> func = Handler)
+int ThreadPool::ThreadPoolAdd(std::shared_ptr<void> args, std::function<void(std::shared_ptr<void>)> func)
 {
     int next = 0;
     int error = 0;
