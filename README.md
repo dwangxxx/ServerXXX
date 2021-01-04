@@ -1,17 +1,29 @@
 # ServerXXX
 A tiny web server based on reactor mode.
 
+# 运行示例
+
+```shell
+// 启动服务器
+cd src
+./myserver
+
+// 运行测试
+cd WebBench
+./test.sh
+```
+
 # 模型结构如下
 
 * 基于**Reactor模式**实现，主线程负责监听事件，将事件放入工作队列中，工作线程负责从工作队列中取出任务来完成相应的IO
 
-* 使用了epoll边沿触发 + EPOLLONESHOT + 非阻塞IO
-* 使用了线程池避免线程频繁创建和销毁带来的开销
-* 实现了一个任务队列，由**条件变量**触发通知线程新任务的到来
-* 实现了一个小根堆的定时器及时剔除超时请求，使用了STL的优先队列来管理定时器
-* 支持HTTP的get、post请求，支持长短连接
+* 使用epoll边沿触发EPOLLET + EPOLLONESHOT + 非阻塞IO, EPOLLONESHOT保证在同一时间同一个连接只由一个线程进行处理
+* 使用线程池避免线程频繁创建和销毁带来的开销
+* 实现了一个任务队列task_queue，应用**条件变量**来触发通知线程新任务的到来
+* 实现了一个小根堆的定时器及时剔除超时请求，使用了STL的优先队列priority_queue来管理定时器
+* 支持HTTP的get、post请求，目前支持短连接
 * 主线程和工作线程分配：
-    * 主线程负责等待epoll中的事件，并把到来的事件放进任务队列，在每次循环的结束(epollWait函数中)剔除超时请求和被置为删除的时间结点
+    * 主线程负责等待epoll中的事件，并把新到来的事件放入任务队列，在每次循环的结束(epollWait函数中)剔除超时请求和被置为删除的时间结点
     * 工作线程阻塞在**条件变量**的等待中，新任务到来后，某一工作线程会被唤醒，执行具体的IO操作和计算任务，如果需要继续监听，会添加到epoll中 
 * 锁的使用：
     * 一是任务队列的添加和取操作，都需要加锁，并配合条件变量
@@ -23,14 +35,10 @@ A tiny web server based on reactor mode.
 
 # 测试分析
 
-* 使用工具Webbench，开启1000客户端进程，时间为60s
-* 分别测试短连接和长连接的情况
-* 为避免磁盘IO对测试结果的影响，测试响应为内存中的"Hello World"字符加上必要的HTTP头
+* 使用工具Webbench，开启500客户端进程，时间为60s
 
 # 测试结果
-| 服务器 | 短连接QPS | 长连接QPS | 
-| - | :-: | -: | 
-| WebServer | 126798| 335338 | 
-| Muduo | 88430 | 358302 | 
 
-* 很明显的一点是长连接能处理的请求数是短连接的三四倍，因为没有了连接建立和断开的开销，不需要频繁accept和shutdown\close等系统调用，也不需要频繁建立和销毁对应的struct。
+* 短连接测试(500个客户端同时发送请求)
+
+![np_keepalive](https://github.com/dwangxxx/ServerXXX/blob/main/test_result/test_nokeep.png)

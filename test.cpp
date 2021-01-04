@@ -8,31 +8,47 @@ class A
 public:
     int a;
     A () : a(0) {}
+    virtual void func1()
+    {
+        cout << "class A!" << endl;
+    }
     ~A() 
     {
         cout << "destructor A" << endl;
     }
 };
 
-class B
+class B : public A
 {
 public:
-    shared_ptr<A> A_ptr;
     int b;
+    /* void func1()
+    {
+        cout << "class B!" << endl;
+    } */
 
-    B () : b(0)
+    virtual void func2()
     {
-        A_ptr = make_shared<A>();
+        cout << "class B virtual!" << endl;
     }
-    ~B() 
-    {
-        cout << "destructor B" << endl;
-    }
+};
+
+class C : public B
+{
+public:
+    int a;
 };
 
 int main()
 {
-    B *b1 = new B();
-    delete b1;
+    B class1;
+    C class2;
+    A classA = static_cast<A>(class1);
+    int **p = (int**)&classA;
+    cout << p[0][2] << endl;
+    cout << (&classA) << endl;
+    p = (int**)&class1;
+    cout << p[0][2] << endl;
+    cout << (&class1) << endl;
     return 0;
 }
